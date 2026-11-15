@@ -42,6 +42,34 @@ VIDEO_FPS_CAP, VIDEO_SIZE, VIDEO_WIDTH = 10, 640, 768
 LOW_CONF = 0.1                              # ByteTrack garde aussi les détections faibles (2e association)
 
 
+def memory_mb() -> str:
+    """Mémoire résidente du processus et de ses fils ffmpeg (journal du service)."""
+    def rss(pid: str) -> int:
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                return next(int(l.split()[1]) for l in fh if l.startswith("VmRSS")) // 1024
+        except (OSError, StopIteration, ValueError):
+            return 0
+    me, kids = str(os.getpid()), []
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                if fh.read().rsplit(")", 1)[1].split()[1] == me:
+                    kids.append(pid)
+        except (OSError, IndexError):
+            pass
+    parts = [f"python {rss(str(os.getpid()))} Mo"] + [f"fils {rss(k)} Mo" for k in kids]
+    try:
+        parts.append(f"cgroup {int(open('/sys/fs/cgroup/memory.current').read()) // 2**20} Mo")
+    except (OSError, ValueError):
+        pass
+    return ", ".join(parts)
+
+
+def log(msg: str) -> None:
+    print(f"[démo] {msg} | mémoire : {memory_mb()}", flush=True)
+
+
 def color(cls: int) -> tuple[int, int, int]:
     rng = np.random.default_rng(cls * 7 + 3)
     return tuple(int(v) for v in rng.integers(60, 230, 3))
@@ -91,6 +119,7 @@ def detect_image(image: np.ndarray | None, conf: float, classes: list[str] | Non
         raise gr.Error("Ajoutez une image.")
     bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     det = MODEL(bgr, conf=conf, classes=class_ids(classes))
+    log(f"image {image.shape[1]}x{image.shape[0]} : {len(det.cls)} objets")
     for box, s, c in zip(det.xyxy, det.conf, det.cls):
         draw_box(bgr, box, f"{NAMES[int(c)]} {s:.2f}", int(c))
     draw_panel(bgr, [f"Objets detectes : {len(det)}"])
@@ -126,7 +155,9 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
     # Lecture par le ffmpeg d'imageio-ffmpeg : un seul fil de décodage, cadence et taille réduites par ffmpeg
     # (le décodeur intégré à OpenCV ouvre un fil par cœur de la machine hôte, trop gourmand en mémoire).
     try:
-        probe = imageio_ffmpeg.read_frames(video)
+        log("vidéo reçue")
+        probe = imageio_ffmpeg.read_frames(video, input_params=["-threads", "1"],
+                                           output_params=["-threads", "1", "-filter_threads", "1", "-frames:v", "1"])
         meta = next(probe)
         probe.close()
     except Exception as exc:  # fichier illisible
@@ -138,9 +169,10 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
     limit = max(1, min(MAX_FRAMES, int(duration * out_fps)))
     frames = imageio_ffmpeg.read_frames(
         video, pix_fmt="bgr24", input_params=["-threads", "1", "-t", str(MAX_SECONDS)],
-        output_params=["-threads", "1", "-an", "-vf",
+        output_params=["-threads", "1", "-filter_threads", "1", "-an", "-vf",
                        f"fps={out_fps:.4f},scale='trunc(min({VIDEO_WIDTH},iw)/2)*2':-2"])
     w, h = next(frames)["size"]
+    log(f"vidéo {meta.get('source_size')} {src_fps:.1f} i/s -> {w}x{h} {out_fps:.1f} i/s, {limit} images")
     tracker = ByteTracker(track_thresh=conf, low_thresh=min(LOW_CONF, conf), new_track_thresh=conf + 0.1)
     seen: dict[str, set[int]] = defaultdict(set)
     out_path = Path(tempfile.mkdtemp(prefix="suivi_")) / "suivi.mp4"
@@ -160,6 +192,8 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
                        + [f"  {k} : {len(v)}" for k, v in sorted(seen.items())])
             writer.write(frame)
             done += 1
+            if done % 30 == 0:
+                log(f"image {done}/{limit}")
             if done % 10 == 0:
                 progress(done / limit, desc=f"Image {done}/{limit}")
     finally:
@@ -168,6 +202,7 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
     if done == 0:
         raise gr.Error("Aucune image lue dans cette vidéo.")
     elapsed = time.perf_counter() - t0
+    log(f"vidéo terminée : {done} images en {elapsed:.0f} s")
     counts = {k: len(v) for k, v in seen.items()}
     summary = (f"**{done / out_fps:.1f} s analysées** ({done} images traitées, {out_fps:.0f} images/s, "
                f"calcul {elapsed:.0f} s). **{sum(counts.values())} objets suivis** : identifiants uniques "
@@ -215,6 +250,7 @@ with gr.Blocks(title="Détection et suivi d'objets") as demo:
     gr.Markdown("<small>Modèle YOLO11n © Ultralytics, licence AGPL-3.0. Images d'exemple : dépôt Ultralytics.</small>")
 
 if __name__ == "__main__":
+    log("démarrage")
     demo.queue(max_size=8, default_concurrency_limit=1).launch(
         server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)),
         theme=gr.themes.Soft(primary_hue="green"), show_error=True, max_file_size="40mb")
