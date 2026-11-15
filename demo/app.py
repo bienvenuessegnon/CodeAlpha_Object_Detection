@@ -12,6 +12,12 @@ import os
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+try:  # glibc : au plus 2 zones d'allocation (sinon une par fil et par cœur de la machine hôte)
+    import ctypes
+    ctypes.CDLL("libc.so.6").mallopt(-8, 2)   # M_ARENA_MAX
+except (OSError, AttributeError):
+    pass
+
 import subprocess
 import tempfile
 import time
@@ -117,31 +123,33 @@ class H264Writer:
 def track_video(video: str | None, conf: float, classes: list[str] | None, progress=gr.Progress()):
     if not video:
         raise gr.Error("Ajoutez une vidéo courte (les 15 premières secondes sont analysées).")
-    cap = cv2.VideoCapture(video)
-    if not cap.isOpened():
-        raise gr.Error("Impossible de lire cette vidéo.")
-    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    limit = min(MAX_FRAMES, int(MAX_SECONDS * src_fps), total or 10**9)
+    # Lecture par le ffmpeg d'imageio-ffmpeg : un seul fil de décodage, cadence et taille réduites par ffmpeg
+    # (le décodeur intégré à OpenCV ouvre un fil par cœur de la machine hôte, trop gourmand en mémoire).
+    try:
+        probe = imageio_ffmpeg.read_frames(video)
+        meta = next(probe)
+        probe.close()
+    except Exception as exc:  # fichier illisible
+        raise gr.Error("Impossible de lire cette vidéo.") from exc
+    src_fps = meta.get("fps") or 25
     step = max(1, round(src_fps / VIDEO_FPS_CAP))        # on traite au plus ~10 images/s
     out_fps = src_fps / step
+    duration = min(MAX_SECONDS, meta.get("duration") or MAX_SECONDS)
+    limit = max(1, min(MAX_FRAMES, int(duration * out_fps)))
+    frames = imageio_ffmpeg.read_frames(
+        video, pix_fmt="bgr24", input_params=["-threads", "1", "-t", str(MAX_SECONDS)],
+        output_params=["-threads", "1", "-an", "-vf",
+                       f"fps={out_fps:.4f},scale='trunc(min({VIDEO_WIDTH},iw)/2)*2':-2"])
+    w, h = next(frames)["size"]
     tracker = ByteTracker(track_thresh=conf, low_thresh=min(LOW_CONF, conf), new_track_thresh=conf + 0.1)
     seen: dict[str, set[int]] = defaultdict(set)
     out_path = Path(tempfile.mkdtemp(prefix="suivi_")) / "suivi.mp4"
-    writer, n, done, t0 = None, 0, 0, time.perf_counter()
+    writer, done, t0 = H264Writer(out_path, out_fps, w, h), 0, time.perf_counter()
     try:
-        while n < limit:
-            ok, frame = cap.read()
-            if not ok:
+        for raw in frames:
+            if done >= limit:
                 break
-            n += 1
-            if (n - 1) % step:
-                continue
-            h, w = frame.shape[:2]
-            scale = min(1.0, VIDEO_WIDTH / w)
-            size = (int(w * scale) // 2 * 2, int(h * scale) // 2 * 2)     # dimensions paires (H.264)
-            if size != (w, h):
-                frame = cv2.resize(frame, size)
+            frame = np.frombuffer(raw, np.uint8).reshape(h, w, 3).copy()
             det = MODEL(frame, conf=min(LOW_CONF, conf), size=VIDEO_SIZE, classes=class_ids(classes))
             tracks = tracker.update(det.xyxy, det.conf, det.cls)
             for t in tracks:
@@ -150,22 +158,18 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
             total_ids = sum(len(v) for v in seen.values())
             draw_panel(frame, [f"Objets dans l'image : {len(tracks)}", f"Total suivi : {total_ids}"]
                        + [f"  {k} : {len(v)}" for k, v in sorted(seen.items())])
-            if writer is None:
-                hh, ww = frame.shape[:2]
-                writer = H264Writer(out_path, out_fps, ww, hh)
             writer.write(frame)
             done += 1
             if done % 10 == 0:
-                progress(n / limit, desc=f"Image {n}/{limit}")
+                progress(done / limit, desc=f"Image {done}/{limit}")
     finally:
-        cap.release()
-        if writer is not None:
-            writer.release()
+        frames.close()
+        writer.release()
     if done == 0:
         raise gr.Error("Aucune image lue dans cette vidéo.")
     elapsed = time.perf_counter() - t0
     counts = {k: len(v) for k, v in seen.items()}
-    summary = (f"**{n / src_fps:.1f} s analysées** ({done} images traitées, {out_fps:.0f} images/s, "
+    summary = (f"**{done / out_fps:.1f} s analysées** ({done} images traitées, {out_fps:.0f} images/s, "
                f"calcul {elapsed:.0f} s). **{sum(counts.values())} objets suivis** : identifiants uniques "
                f"ByteTrack ; un objet perdu puis retrouvé peut recevoir un nouvel identifiant.")
     return str(out_path), table(counts), summary
