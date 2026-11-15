@@ -6,6 +6,12 @@ Lancer : pip install -r demo/requirements.txt && python demo/app.py
 from __future__ import annotations
 
 import os
+
+# Un seul fil de calcul : l'offre gratuite n'a qu'une fraction de CPU, et chaque fil OpenBLAS / OpenCV
+# réserve sa propre mémoire (512 Mo au total).
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import tempfile
 import time
 from collections import Counter, defaultdict
@@ -15,9 +21,10 @@ import cv2
 import gradio as gr
 import numpy as np
 
-from detector import Detections, OnnxYolo
+from detector import OnnxYolo
 from tracker import ByteTracker
 
+cv2.setNumThreads(1)
 HERE = Path(__file__).parent
 MODEL = OnnxYolo(str(HERE / "model" / "yolo11n.onnx"))
 NAMES = MODEL.names
@@ -123,7 +130,8 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
                 writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"VP80"), out_fps, (ww, hh))
             writer.write(frame)
             done += 1
-            progress(n / limit, desc=f"Image {n}/{limit}")
+            if done % 10 == 0:
+                progress(n / limit, desc=f"Image {n}/{limit}")
     finally:
         cap.release()
         if writer is not None:
