@@ -12,11 +12,21 @@ import os
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
-try:  # glibc : au plus 2 zones d'allocation (sinon une par fil et par cœur de la machine hôte)
+# glibc : au plus 2 zones d'allocation, et les gros blocs (tenseurs, images) rendus au système dès leur
+# libération (seuil mmap fixe), sinon le tas grossit d'image en image sur l'hébergeur.
+try:
     import ctypes
-    ctypes.CDLL("libc.so.6").mallopt(-8, 2)   # M_ARENA_MAX
+    _LIBC = ctypes.CDLL("libc.so.6")
+    _LIBC.mallopt(-8, 2)              # M_ARENA_MAX
+    _LIBC.mallopt(-3, 256 * 1024)     # M_MMAP_THRESHOLD
+    _LIBC.mallopt(-1, 1024 * 1024)    # M_TRIM_THRESHOLD
 except (OSError, AttributeError):
-    pass
+    _LIBC = None
+
+
+def release_memory() -> None:
+    if _LIBC is not None:
+        _LIBC.malloc_trim(0)
 
 import subprocess
 import tempfile
@@ -198,6 +208,7 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
             writer.write(frame)
             done += 1
             if done % 10 == 0:
+                release_memory()
                 log(f"image {done}/{limit}")
             if done % 10 == 0:
                 progress(done / limit, desc=f"Image {done}/{limit}")
@@ -207,6 +218,7 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
     if done == 0:
         raise gr.Error("Aucune image lue dans cette vidéo.")
     elapsed = time.perf_counter() - t0
+    release_memory()
     log(f"vidéo terminée : {done} images en {elapsed:.0f} s")
     counts = {k: len(v) for k, v in seen.items()}
     summary = (f"**{done / out_fps:.1f} s analysées** ({done} images traitées, {out_fps:.0f} images/s, "
