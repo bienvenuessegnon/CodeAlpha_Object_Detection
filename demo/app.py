@@ -12,6 +12,7 @@ import os
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
+import subprocess
 import tempfile
 import time
 from collections import Counter, defaultdict
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import cv2
 import gradio as gr
+import imageio_ffmpeg
 import numpy as np
 
 from detector import OnnxYolo
@@ -91,6 +93,27 @@ def detect_image(image: np.ndarray | None, conf: float, classes: list[str] | Non
 
 
 # ------------------------------------------------------------------ vidéo
+class H264Writer:
+    """Écrit une vidéo MP4 H.264 lisible par les navigateurs via le ffmpeg fourni par imageio-ffmpeg.
+
+    Un seul fil d'encodage et le préréglage « ultrafast » : peu de mémoire et peu de CPU.
+    """
+
+    def __init__(self, path: Path, fps: float, width: int, height: int):
+        cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
+               "-s", f"{width}x{height}", "-r", f"{fps:.3f}", "-i", "-", "-an", "-c:v", "libx264",
+               "-preset", "ultrafast", "-crf", "26", "-threads", "1", "-pix_fmt", "yuv420p",
+               "-movflags", "+faststart", str(path)]
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+
+    def write(self, frame: np.ndarray) -> None:
+        self.proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+
+    def release(self) -> None:
+        self.proc.stdin.close()
+        self.proc.wait(timeout=120)
+
+
 def track_video(video: str | None, conf: float, classes: list[str] | None, progress=gr.Progress()):
     if not video:
         raise gr.Error("Ajoutez une vidéo courte (les 15 premières secondes sont analysées).")
@@ -104,7 +127,7 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
     out_fps = src_fps / step
     tracker = ByteTracker(track_thresh=conf, low_thresh=min(LOW_CONF, conf), new_track_thresh=conf + 0.1)
     seen: dict[str, set[int]] = defaultdict(set)
-    out_path = Path(tempfile.mkdtemp(prefix="suivi_")) / "suivi.webm"
+    out_path = Path(tempfile.mkdtemp(prefix="suivi_")) / "suivi.mp4"
     writer, n, done, t0 = None, 0, 0, time.perf_counter()
     try:
         while n < limit:
@@ -115,8 +138,10 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
             if (n - 1) % step:
                 continue
             h, w = frame.shape[:2]
-            if w > VIDEO_WIDTH:
-                frame = cv2.resize(frame, (VIDEO_WIDTH, int(h * VIDEO_WIDTH / w)))
+            scale = min(1.0, VIDEO_WIDTH / w)
+            size = (int(w * scale) // 2 * 2, int(h * scale) // 2 * 2)     # dimensions paires (H.264)
+            if size != (w, h):
+                frame = cv2.resize(frame, size)
             det = MODEL(frame, conf=min(LOW_CONF, conf), size=VIDEO_SIZE, classes=class_ids(classes))
             tracks = tracker.update(det.xyxy, det.conf, det.cls)
             for t in tracks:
@@ -127,7 +152,7 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
                        + [f"  {k} : {len(v)}" for k, v in sorted(seen.items())])
             if writer is None:
                 hh, ww = frame.shape[:2]
-                writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"VP80"), out_fps, (ww, hh))
+                writer = H264Writer(out_path, out_fps, ww, hh)
             writer.write(frame)
             done += 1
             if done % 10 == 0:
