@@ -58,7 +58,12 @@ def memory_mb() -> str:
                     kids.append(pid)
         except (OSError, IndexError):
             pass
-    parts = [f"python {rss(str(os.getpid()))} Mo"] + [f"fils {rss(k)} Mo" for k in kids]
+    try:
+        st = {l.split(":")[0]: l.split()[1] for l in open("/proc/self/status") if ":" in l and len(l.split()) > 1}
+        extra = [f"anon {int(st['RssAnon']) // 1024} Mo", f"fils d'exécution {st['Threads']}"]
+    except (OSError, KeyError, ValueError):
+        extra = []
+    parts = [f"python {rss(str(os.getpid()))} Mo"] + extra + [f"fils {rss(k)} Mo" for k in kids]
     try:
         parts.append(f"cgroup {int(open('/sys/fs/cgroup/memory.current').read()) // 2**20} Mo")
     except (OSError, ValueError):
@@ -192,7 +197,7 @@ def track_video(video: str | None, conf: float, classes: list[str] | None, progr
                        + [f"  {k} : {len(v)}" for k, v in sorted(seen.items())])
             writer.write(frame)
             done += 1
-            if done % 30 == 0:
+            if done % 10 == 0:
                 log(f"image {done}/{limit}")
             if done % 10 == 0:
                 progress(done / limit, desc=f"Image {done}/{limit}")
@@ -250,7 +255,12 @@ with gr.Blocks(title="Détection et suivi d'objets") as demo:
     gr.Markdown("<small>Modèle YOLO11n © Ultralytics, licence AGPL-3.0. Images d'exemple : dépôt Ultralytics.</small>")
 
 if __name__ == "__main__":
-    log("démarrage")
+    try:
+        flags = next(l for l in open("/proc/cpuinfo") if l.startswith("flags")).split()
+        cpu = " ".join(f for f in flags if f.startswith(("avx512f", "amx", "avx2")))
+    except (OSError, StopIteration):
+        cpu = "?"
+    log(f"démarrage ({os.cpu_count()} cœurs visibles, {cpu})")
     demo.queue(max_size=8, default_concurrency_limit=1).launch(
         server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)),
         theme=gr.themes.Soft(primary_hue="green"), show_error=True, max_file_size="40mb")
