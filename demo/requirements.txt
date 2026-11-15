@@ -1,0 +1,5 @@
+onnxruntime==1.32.0
+opencv-python-headless==5.0.0.93
+numpy==2.5.4
+scipy==1.18.1
+gradio==6.32.0
