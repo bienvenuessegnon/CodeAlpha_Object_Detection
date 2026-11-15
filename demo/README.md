@@ -10,7 +10,7 @@ Pour tenir dans 512 Mo de mémoire (offre gratuite Render), la démo n'utilise n
 | Détection | YOLO11n exporté en ONNX (`model/yolo11n.onnx`, 11 Mo, dimensions dynamiques), exécuté avec onnxruntime ; prétraitement et NMS en numpy / OpenCV (`detector.py`) |
 | Suivi | ByteTrack allégé : filtre de Kalman + association en deux temps (scores hauts puis bas), algorithme hongrois de SciPy (`tracker.py`) |
 | Vidéo | 15 s au plus, 10 images/s traitées au plus, largeur ≤ 768 px, lecture et sortie MP4 H.264 par le ffmpeg d’imageio-ffmpeg, un seul fil |
-| Mémoire mesurée | ≈ 245 Mo au repos, ≈ 370 Mo au maximum (image + vidéos de 15 s) |
+| Mémoire mesurée sur Render | ≈ 235 Mo au repos ; pendant une vidéo de 15 s, ≈ 256 Mo (Python) + ≈ 90 Mo (deux ffmpeg), soit ≈ 345 Mo, stable d’une image à l’autre (journal `[démo]` du service) |
 
 Sur l'exemple, les détections sont identiques à celles d'Ultralytics (mêmes boîtes et scores sur `bus.jpg`).
 

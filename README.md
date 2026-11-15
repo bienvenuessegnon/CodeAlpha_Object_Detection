@@ -7,6 +7,11 @@ Real-time object detection, tracking and counting with **YOLO (Ultralytics)** an
 ![YOLO](https://img.shields.io/badge/YOLO11-Object%20Detection-orange)
 ![CodeAlpha](https://img.shields.io/badge/CodeAlpha-AI%20Internship-purple)
 
+**Démo en ligne : [detection-suivi-objets.onrender.com](https://detection-suivi-objets.onrender.com)** — image and
+short video (15 s) in the browser. Free hosting: the first load can take about a minute and video processing takes
+one to two minutes. The demo is a lightweight version (YOLO11n in ONNX + a NumPy ByteTrack, no PyTorch), see
+[`demo/`](demo/).
+
 Project developed for **Task 4 — Object Detection and Tracking** of the CodeAlpha Artificial Intelligence Internship.
 
 | Task requirement | Implementation |
@@ -90,7 +95,8 @@ CodeAlpha_Object_Detection/
 ├── requirements-dev.txt    # + pytest
 ├── tests/
 │   └── test_object_detection.py
-└── docs/                   # demo frames
+├── docs/                   # demo frames
+└── demo/                   # lightweight online demo (ONNX + ByteTrack, Gradio)
 ```
 
 ## Limitations and ideas
